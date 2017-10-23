@@ -26,32 +26,34 @@ from .literals import (
     TEST_SMALL_DOCUMENT_FILENAME, TEST_SMALL_DOCUMENT_PATH
 )
 from ..models import Document, DocumentType
+from ..permissions import (
+    permission_document_type_create, permission_document_type_delete,
+    permission_document_type_edit
+)
 
 
 class DocumentTypeAPITestCase(BaseAPITestCase):
     def setUp(self):
         super(DocumentTypeAPITestCase, self).setUp()
-        self.admin_user = get_user_model().objects.create_superuser(
-            username=TEST_ADMIN_USERNAME, email=TEST_ADMIN_EMAIL,
-            password=TEST_ADMIN_PASSWORD
-        )
+        self.login_user()
 
-        self.client.login(
-            username=TEST_ADMIN_USERNAME, password=TEST_ADMIN_PASSWORD
-        )
-
-    def tearDown(self):
-        self.admin_user.delete()
-        super(DocumentTypeAPITestCase, self).tearDown()
-
-    def test_document_type_create(self):
-        self.assertEqual(DocumentType.objects.all().count(), 0)
-
-        response = self.client.post(
-            reverse('rest_api:documenttype-list'), data={
+    def _request_document_type_create(self):
+        return self.post(
+            viewname='rest_api:documenttype-list', data={
                 'label': TEST_DOCUMENT_TYPE_LABEL
             }
         )
+
+    def test_document_type_create_no_permission(self):
+        response = self._request_document_type_create()
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(DocumentType.objects.all().count(), 0)
+
+    def test_document_type_create_with_permission(self):
+        self.grant_permission(permission=permission_document_type_create)
+
+        response = self._request_document_type_create()
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(DocumentType.objects.all().count(), 1)
@@ -59,40 +61,95 @@ class DocumentTypeAPITestCase(BaseAPITestCase):
             DocumentType.objects.all().first().label, TEST_DOCUMENT_TYPE_LABEL
         )
 
-    def test_document_type_edit_via_put(self):
-        document_type = DocumentType.objects.create(
+    def _request_document_type_put(self):
+        return self.put(
+            viewname='rest_api:documenttype-detail', args=(
+                self.document_type.pk,
+            ), data={'label': TEST_DOCUMENT_TYPE_LABEL_EDITED}
+        )
+
+    def test_document_type_edit_via_put_no_permission(self):
+        self.document_type = DocumentType.objects.create(
             label=TEST_DOCUMENT_TYPE_LABEL
         )
 
-        self.client.put(
-            reverse('rest_api:documenttype-detail', args=(document_type.pk,)),
-            {'label': TEST_DOCUMENT_TYPE_LABEL_EDITED}
-        )
+        response = self._request_document_type_put()
+        self.assertEqual(response.status_code, 403)
 
-        document_type = DocumentType.objects.get(pk=document_type.pk)
-        self.assertEqual(document_type.label, TEST_DOCUMENT_TYPE_LABEL_EDITED)
-
-    def test_document_type_edit_via_patch(self):
-        document_type = DocumentType.objects.create(
+    def test_document_type_edit_via_put_with_access(self):
+        self.document_type = DocumentType.objects.create(
             label=TEST_DOCUMENT_TYPE_LABEL
         )
 
-        self.client.patch(
-            reverse('rest_api:documenttype-detail', args=(document_type.pk,)),
-            {'label': TEST_DOCUMENT_TYPE_LABEL_EDITED}
+        self.grant_access(
+            permission=permission_document_type_edit, obj=self.document_type
+        )
+        response = self._request_document_type_put()
+        self.assertEqual(response.status_code, 200)
+
+        self.document_type.refresh_from_db()
+        self.assertEqual(
+            self.document_type.label, TEST_DOCUMENT_TYPE_LABEL_EDITED
         )
 
-        document_type = DocumentType.objects.get(pk=document_type.pk)
-        self.assertEqual(document_type.label, TEST_DOCUMENT_TYPE_LABEL_EDITED)
+    def _request_document_type_patch(self):
+        return self.patch(
+            viewname='rest_api:documenttype-detail', args=(
+                self.document_type.pk,
+            ), data={'label': TEST_DOCUMENT_TYPE_LABEL_EDITED}
+        )
 
-    def test_document_type_delete(self):
-        document_type = DocumentType.objects.create(
+    def test_document_type_edit_via_patch_no_permission(self):
+        self.document_type = DocumentType.objects.create(
             label=TEST_DOCUMENT_TYPE_LABEL
         )
 
-        self.client.delete(
-            reverse('rest_api:documenttype-detail', args=(document_type.pk,))
+        response = self._request_document_type_patch()
+        self.assertEqual(response.status_code, 403)
+
+    def test_document_type_edit_via_patch_with_access(self):
+        self.document_type = DocumentType.objects.create(
+            label=TEST_DOCUMENT_TYPE_LABEL
         )
+
+        self.grant_access(
+            permission=permission_document_type_edit, obj=self.document_type
+        )
+
+        response = self._request_document_type_patch()
+        self.assertEqual(response.status_code, 200)
+
+        self.document_type.refresh_from_db()
+        self.assertEqual(
+            self.document_type.label, TEST_DOCUMENT_TYPE_LABEL_EDITED
+        )
+
+    def _request_document_type_delete(self):
+        return self.delete(
+            viewname='rest_api:documenttype-detail', args=(
+                self.document_type.pk,
+            )
+        )
+
+    def test_document_type_delete_no_permission(self):
+        self.document_type = DocumentType.objects.create(
+            label=TEST_DOCUMENT_TYPE_LABEL
+        )
+
+        response = self._request_document_type_delete()
+        self.assertEqual(response.status_code, 403)
+
+    def test_document_type_delete_with_access(self):
+        self.document_type = DocumentType.objects.create(
+            label=TEST_DOCUMENT_TYPE_LABEL
+        )
+
+        self.grant_access(
+            permission=permission_document_type_delete, obj=self.document_type
+        )
+
+        response = self._request_document_type_delete()
+        self.assertEqual(response.status_code, 204)
 
         self.assertEqual(DocumentType.objects.all().count(), 0)
 
