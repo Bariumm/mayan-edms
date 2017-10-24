@@ -27,8 +27,10 @@ from .literals import (
 )
 from ..models import Document, DocumentType
 from ..permissions import (
-    permission_document_type_create, permission_document_type_delete,
-    permission_document_type_edit
+    permission_document_create, permission_document_download,
+    permission_document_new_version, permission_document_type_create,
+    permission_document_type_delete, permission_document_type_edit,
+    permission_document_version_revert, permission_document_version_view
 )
 
 
@@ -47,7 +49,7 @@ class DocumentTypeAPITestCase(BaseAPITestCase):
     def test_document_type_create_no_permission(self):
         response = self._request_document_type_create()
 
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(DocumentType.objects.all().count(), 0)
 
     def test_document_type_create_with_permission(self):
@@ -55,7 +57,7 @@ class DocumentTypeAPITestCase(BaseAPITestCase):
 
         response = self._request_document_type_create()
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(DocumentType.objects.all().count(), 1)
         self.assertEqual(
             DocumentType.objects.all().first().label, TEST_DOCUMENT_TYPE_LABEL
@@ -74,7 +76,7 @@ class DocumentTypeAPITestCase(BaseAPITestCase):
         )
 
         response = self._request_document_type_put()
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_document_type_edit_via_put_with_access(self):
         self.document_type = DocumentType.objects.create(
@@ -85,7 +87,7 @@ class DocumentTypeAPITestCase(BaseAPITestCase):
             permission=permission_document_type_edit, obj=self.document_type
         )
         response = self._request_document_type_put()
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         self.document_type.refresh_from_db()
         self.assertEqual(
@@ -105,7 +107,7 @@ class DocumentTypeAPITestCase(BaseAPITestCase):
         )
 
         response = self._request_document_type_patch()
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_document_type_edit_via_patch_with_access(self):
         self.document_type = DocumentType.objects.create(
@@ -117,7 +119,7 @@ class DocumentTypeAPITestCase(BaseAPITestCase):
         )
 
         response = self._request_document_type_patch()
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         self.document_type.refresh_from_db()
         self.assertEqual(
@@ -137,7 +139,7 @@ class DocumentTypeAPITestCase(BaseAPITestCase):
         )
 
         response = self._request_document_type_delete()
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_document_type_delete_with_access(self):
         self.document_type = DocumentType.objects.create(
@@ -149,7 +151,7 @@ class DocumentTypeAPITestCase(BaseAPITestCase):
         )
 
         response = self._request_document_type_delete()
-        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.status_code, status.HTTP_204_NO_DATA)
 
         self.assertEqual(DocumentType.objects.all().count(), 0)
 
@@ -158,21 +160,13 @@ class DocumentTypeAPITestCase(BaseAPITestCase):
 class DocumentAPITestCase(BaseAPITestCase):
     def setUp(self):
         super(DocumentAPITestCase, self).setUp()
-        self.admin_user = get_user_model().objects.create_superuser(
-            username=TEST_ADMIN_USERNAME, email=TEST_ADMIN_EMAIL,
-            password=TEST_ADMIN_PASSWORD
-        )
-
-        self.client.login(
-            username=TEST_ADMIN_USERNAME, password=TEST_ADMIN_PASSWORD
-        )
+        self.login_user()
 
         self.document_type = DocumentType.objects.create(
             label=TEST_DOCUMENT_TYPE_LABEL
         )
 
     def tearDown(self):
-        self.admin_user.delete()
         self.document_type.delete()
         super(DocumentAPITestCase, self).tearDown()
 
@@ -183,35 +177,48 @@ class DocumentAPITestCase(BaseAPITestCase):
                 label=TEST_SMALL_DOCUMENT_FILENAME
             )
 
-        # For compatibility
-        return self.document
-
-    def test_document_upload(self):
+    def _request_document_upload(self):
         with open(TEST_DOCUMENT_PATH) as file_descriptor:
-            response = self.client.post(
-                reverse('rest_api:document-list'), {
+            return self.post(
+                viewname='rest_api:document-list', data={
                     'document_type': self.document_type.pk,
                     'file': file_descriptor
                 }
             )
 
-        document_data = loads(response.content)
+    def test_document_upload_no_permission(self):
+        response = self._request_document_upload()
 
-        self.assertEqual(
-            response.status_code, status.HTTP_201_CREATED
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_document_upload_with_access(self):
+        self.grant_access(
+           permission=permission_document_create, obj=self.document_type
         )
+        response = self._request_document_upload()
+
+        self.assertEqual(response.status_code, status.HTTP_202_CREATED)
+
         self.assertEqual(Document.objects.count(), 1)
 
         document = Document.objects.first()
 
-        self.assertEqual(document.pk, document_data['id'])
+        # Correct document PK
+        self.assertEqual(document.pk, response.data['id'])
 
+        # Document initial version uploaded correctly
         self.assertEqual(document.versions.count(), 1)
 
+        # Document's file exists in the document storage
         self.assertEqual(document.exists(), True)
+
+        # And is of the expected size
         self.assertEqual(document.size, 272213)
 
+        # Correct mimetype
         self.assertEqual(document.file_mimetype, 'application/pdf')
+
+        # Check document file encoding
         self.assertEqual(document.file_mime_encoding, 'binary')
         self.assertEqual(document.label, TEST_DOCUMENT_FILENAME)
         self.assertEqual(
@@ -220,117 +227,169 @@ class DocumentAPITestCase(BaseAPITestCase):
         )
         self.assertEqual(document.page_count, 47)
 
-    def test_document_new_version_upload(self):
-        document = self._create_document()
-
+    def _request_document_new_version_upload(self):
         # Artifical delay since MySQL doesn't store microsecond data in
         # timestamps. Version timestamp is used to determine which version
         # is the latest.
         time.sleep(1)
+
         with open(TEST_DOCUMENT_PATH) as file_descriptor:
-            response = self.client.post(
-                reverse(
-                    'rest_api:document-version-list', args=(document.pk,)
-                ), {
-                    'comment': '',
-                    'file': file_descriptor,
+            return self.post(
+                viewname='rest_api:document-version-list', args=(
+                    self.document.pk,
+                ), data={
+                    'comment': '', 'file': file_descriptor,
                 }
             )
 
+    def test_document_new_version_upload_no_permission(self):
+        self._create_document()
+
+        response = self._request_document_new_version_upload()
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_document_new_version_upload_with_access(self):
+        self._create_document()
+
+        self.grant_access(
+            permission=permission_document_new_version, obj=self.document
+        )
+        response = self._request_document_new_version_upload()
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
 
-        self.assertEqual(document.versions.count(), 2)
-        self.assertEqual(document.exists(), True)
-        self.assertEqual(document.size, 272213)
-        self.assertEqual(document.file_mimetype, 'application/pdf')
-        self.assertEqual(document.file_mime_encoding, 'binary')
+        self.assertEqual(self.document.versions.count(), 2)
+        self.assertEqual(self.document.exists(), True)
+        self.assertEqual(self.document.size, 272213)
+        self.assertEqual(self.document.file_mimetype, 'application/pdf')
+        self.assertEqual(self.document.file_mime_encoding, 'binary')
         self.assertEqual(
-            document.checksum,
+            self.document.checksum,
             'c637ffab6b8bb026ed3784afdb07663fddc60099853fae2be93890852a69ecf3'
         )
-        self.assertEqual(document.page_count, 47)
+        self.assertEqual(self.document.page_count, 47)
 
-    def test_document_version_revert(self):
-        document = self._create_document()
-
+    def _create_new_version(self):
         # Needed by MySQL as milliseconds value is not store in timestamp field
         time.sleep(1)
 
         with open(TEST_DOCUMENT_PATH) as file_object:
-            document.new_version(file_object=file_object)
+            self.document.new_version(file_object=file_object)
 
-        self.assertEqual(document.versions.count(), 2)
-
-        last_version = document.versions.last()
-
-        self.client.delete(
-            reverse(
-                'rest_api:documentversion-detail',
-                args=(document.pk, last_version.pk,)
+    def _request_document_version_revert(self):
+        return self.delete(
+            viewname='rest_api:documentversion-detail', args=(
+                self.document.pk, self.document.latest_version.pk
             )
         )
 
-        self.assertEqual(document.versions.count(), 1)
+    def test_document_version_revert_no_permission(self):
+        self._create_document()
+        self._create_new_version()
 
-        self.assertEqual(document.versions.first(), document.latest_version)
+        response = self._request_document_version_revert()
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_document_version_list(self):
-        document = self._create_document()
+    def test_document_version_revert_with_access(self):
+        self._create_document()
+        self._create_new_version()
 
-        # Needed by MySQL as milliseconds value is not store in timestamp field
-        time.sleep(1)
-
-        with open(TEST_DOCUMENT_PATH) as file_object:
-            document.new_version(file_object=file_object)
-
-        document.refresh_from_db()
-
-        self.assertEqual(document.versions.count(), 2)
-
-        response = self.client.get(
-            reverse(
-                'rest_api:document-version-list',
-                args=(document.pk,)
-            )
+        self.grant_access(
+            permission=permission_document_version_revert, obj=self.document
         )
+        response = self._request_document_version_revert()
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        self.assertEqual(self.document.versions.count(), 1)
+        self.assertEqual(
+            self.document.versions.first(), self.document.latest_version
+        )
+
+    def _request_document_version_list(self):
+        return self.get(
+            viewname='rest_api:document-version-list', args=(self.document.pk,)
+        )
+
+    def test_document_version_list_no_permission(self):
+        self._create_document()
+        self._create_new_version()
+
+        response = self._request_document_version_list()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_document_version_list_with_access(self):
+        self._create_document()
+        self._create_new_version()
+
+        self.grant_access(
+            permission=permission_document_version_view, obj=self.document
+        )
+        response = self._request_document_version_list()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         self.assertEqual(
             response.data['results'][1]['checksum'],
-            document.latest_version.checksum
+            self.document.latest_version.checksum
         )
 
-    def test_document_download(self):
-        document = self._create_document()
-
-        response = self.client.get(
-            reverse(
-                'rest_api:document-download', args=(document.pk,)
-            )
+    def _request_document_download(self):
+        return self.get(
+            viewname='rest_api:document-download', args=(self.document.pk,)
         )
 
-        with document.open() as file_object:
+    def test_document_download_no_permission(self):
+        self._create_document()
+
+        response = self._request_document_download()
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_document_download_with_access(self):
+        self._create_document()
+
+        self.grant_access(
+            permission=permission_document_download, obj=self.document
+        )
+        response = self._request_document_download()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        with self.document.open() as file_object:
             assert_download_response(
                 self, response, content=file_object.read(),
                 basename=TEST_SMALL_DOCUMENT_FILENAME,
-                mime_type='{}; charset=utf-8'.format(document.file_mimetype)
+                mime_type='{}; charset=utf-8'.format(
+                    self.document.file_mimetype
+                )
             )
 
-    def test_document_version_download(self):
-        document = self._create_document()
-
-        latest_version = document.latest_version
-        response = self.client.get(
-            reverse(
-                'rest_api:documentversion-download',
-                args=(document.pk, latest_version.pk,)
+    def _request_document_version_download(self):
+        return self.get(
+            viewname='rest_api:documentversion-download', args=(
+                self.document.pk, self.document.latest_version.pk,
             )
         )
 
-        with latest_version.open() as file_object:
+    def test_document_version_download_no_permission(self):
+        self._create_document()
+
+        response = self._request_document_version_download()
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_document_version_download_with_access(self):
+        self._create_document()
+
+        self.grant_access(
+            permission=permission_document_download, obj=self.document
+        )
+        response = self._request_document_version_download()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        with self.document.latest_version.open() as file_object:
             assert_download_response(
                 self, response, content=file_object.read(),
-                basename=force_text(latest_version),
-                mime_type='{}; charset=utf-8'.format(document.file_mimetype)
+                basename=force_text(self.document.latest_version),
+                mime_type='{}; charset=utf-8'.format(
+                    self.document.file_mimetype
+                )
             )
 
     def test_document_version_download_preserve_extension(self):
